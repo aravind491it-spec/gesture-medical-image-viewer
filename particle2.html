@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gesture Controlled Medical Viewer</title>
+
+<style>
+body {
+    margin: 0;
+    background: #0a0a0a;
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+    color: white;
+}
+
+#viewer {
+    width: 100vw;
+    
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+}
+
+#medicalImage {
+    max-width: 80%;
+    max-height: 80%;
+    transition: transform 0.1s ease;
+    transform-origin: center center;
+}
+
+#video-container {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    width: 200px;
+    height: 150px;
+    border: 2px solid #444;
+    border-radius: 8px;
+    overflow: hidden;
+    transform: scaleX(-1);
+}
+
+video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+#ui {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 10;
+}
+
+button, input {
+    margin-top: 5px;
+    padding: 6px 10px;
+    border-radius: 5px;
+    border: none;
+    cursor: pointer;
+}
+</style>
+</head>
+<body>
+
+<div id="ui">
+    <h2>Gesture Medical Viewer</h2>
+    <p>Pinch: Zoom | Move: Pan | Open Palm: Send</p>
+
+    <input type="file" id="imageUpload" accept="image/*">
+    <br>
+    <button onclick="resetView()">Reset View</button>
+</div>
+
+<div id="viewer">
+    <!-- Default placeholder image -->
+    <img id="medicalImage"
+         src="https://upload.wikimedia.org/wikipedia/commons/8/8e/Normal_CT_head_5mm.jpg">
+</div>
+
+<div id="video-container">
+    <video id="input-video" autoplay playsinline></video>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+<script>
+let scale = 1;
+let translateX = 0;
+let translateY = 0;
+let lastPinchDistance = null;
+let palmSent = false;
+
+const image = document.getElementById("medicalImage");
+
+// ---------------- IMAGE UPLOAD ----------------
+document.getElementById("imageUpload").addEventListener("change", function(event) {
+    const file = event.target.files[0];
+
+    if (file && file.type.startsWith("image/")) {
+        image.src = URL.createObjectURL(file);
+        resetView();
+        console.log("Image loaded successfully");
+    } else {
+        alert("Please select a valid image file.");
+    }
+});
+
+// ---------------- RESET ----------------
+function resetView() {
+    scale = 1;
+    translateX = 0;
+    translateY = 0;
+    updateTransform();
+}
+
+// ---------------- OPTIONAL WEBSOCKET ----------------
+let socket;
+try {
+    socket = new WebSocket("ws://10.17.230.188:8080");
+} catch (e) {
+    console.log("WebSocket not connected");
+}
+
+// ---------------- HAND TRACKING ----------------
+const videoElement = document.getElementById('input-video');
+
+const hands = new Hands({
+    locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+});
+
+hands.onResults((results) => {
+    if (results.multiHandLandmarks?.length > 0) {
+
+        const landmarks = results.multiHandLandmarks[0];
+        const thumb = landmarks[4];
+        const index = landmarks[8];
+
+        const dx = thumb.x - index.x;
+        const dy = thumb.y - index.y;
+        const pinchDistance = Math.sqrt(dx * dx + dy * dy);
+
+        // -------- PINCH ZOOM --------
+        if (lastPinchDistance !== null) {
+            scale += (pinchDistance - lastPinchDistance) * 5;
+            scale = Math.min(Math.max(scale, 0.5), 5);
+        }
+        lastPinchDistance = pinchDistance;
+
+        // -------- PAN --------
+        translateX = (index.x - 0.5) * 1000;
+        translateY = (index.y - 0.5) * 600;
+
+        updateTransform();
+
+        // -------- OPEN PALM --------
+        const isOpenPalm =
+            landmarks[8].y < landmarks[6].y &&
+            landmarks[12].y < landmarks[10].y &&
+            landmarks[16].y < landmarks[14].y &&
+            landmarks[20].y < landmarks[18].y;
+
+        if (isOpenPalm && !palmSent) {
+            sendToSecondDevice();
+            palmSent = true;
+        }
+
+        if (!isOpenPalm) palmSent = false;
+    }
+});
+
+const cameraFeed = new Camera(videoElement, {
+    onFrame: async () => {
+        await hands.send({ image: videoElement });
+    },
+    width: 640,
+    height: 480
+});
+cameraFeed.start();
+
+// ---------------- UPDATE TRANSFORM ----------------
+function updateTransform() {
+    image.style.transform =
+        `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+}
+
+// ---------------- SEND DATA ----------------
+function sendToSecondDevice() {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        const dataPacket = {
+            image: image.src,
+            scale,
+            translateX,
+            translateY
+        };
+        socket.send(JSON.stringify(dataPacket));
+        console.log("Image + Transform Sent");
+    }
+}
+</script>
+
+</body>
+</html>
